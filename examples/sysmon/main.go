@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"runtime"
 	"strconv"
@@ -144,20 +145,24 @@ type InitData struct {
 }
 
 func main() {
-	var count int
-	_ = count
 	w := webview.New(true)
 	defer w.Destroy()
 
-	w.SetTitle("System Monitor")
-	w.SetSize(400, 500, webview.HintFixed)
+	if err := w.SetSize(400, 500, webview.HintMin); err != nil {
+		log.Fatal(err)
+	}
+	if err := w.SetTitle("System Monitor"); err != nil {
+		log.Fatal(err)
+	}
 
-	w.Bind("getInitData", func() InitData {
+	if err := w.Bind("getInitData", func() InitData {
 		return InitData{
 			OS:      runtime.GOOS,
 			Version: webview.Version(),
 		}
-	})
+	}); err != nil {
+		log.Fatal(err)
+	}
 
 	// Background ticker to fetch and dispatch stats
 	go func() {
@@ -191,14 +196,18 @@ func main() {
 			}
 
 			// Safe UI update from goroutine
-			w.Dispatch(func() {
-				w.Eval(fmt.Sprintf("window.updateStats(%v)", jsonString(stats)))
+			_ = w.Dispatch(func() {
+				_ = w.Eval(fmt.Sprintf("window.updateStats(%v)", jsonString(stats)))
 			})
 		}
 	}()
 
-	w.SetHtml(html)
-	w.Run()
+	if err := w.SetHtml(html); err != nil {
+		log.Fatal(err)
+	}
+	if err := w.Run(); err != nil {
+		log.Fatal(err)
+	}
 }
 
 func jsonString(v any) string {

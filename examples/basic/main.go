@@ -1,13 +1,22 @@
 package main
 
-import webview "github.com/samcharles93/webview_go"
+import (
+	"log"
+
+	webview "github.com/samcharles93/webview_go"
+)
 
 func main() {
 	w := webview.New(false)
 	defer w.Destroy()
-	w.SetTitle("Basic Example")
-	w.SetSize(480, 320, webview.HintNone)
-	w.SetHtml(`
+
+	if err := w.SetSize(480, 320, webview.HintNone); err != nil {
+		log.Fatal(err)
+	}
+	if err := w.SetTitle("Basic Example"); err != nil {
+		log.Fatal(err)
+	}
+	if err := w.SetHtml(`
 		<!DOCTYPE html>
 		<html>
 		<head>
@@ -28,6 +37,11 @@ func main() {
 			<h1>Thanks for using webview_go!</h1>
 		</body>
 		</html>
-	`)
-	w.Run()
+	`); err != nil {
+		log.Fatal(err)
+	}
+
+	if err := w.Run(); err != nil {
+		log.Fatal(err)
+	}
 }

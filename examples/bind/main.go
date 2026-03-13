@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"time"
 
 	webview "github.com/samcharles93/webview_go"
@@ -97,23 +98,31 @@ func main() {
 	w := webview.New(true)
 	defer w.Destroy()
 
-	w.SetTitle("Modern Bind Example")
-	w.SetSize(480, 420, webview.HintNone)
+	if err := w.SetTitle("Modern Bind Example"); err != nil {
+		log.Fatal(err)
+	}
+	if err := w.SetSize(480, 420, webview.HintNone); err != nil {
+		log.Fatal(err)
+	}
 
 	// Bind the version info
-	w.Bind("getVersion", func() webview.VersionInfo {
+	if err := w.Bind("getVersion", func() webview.VersionInfo {
 		return webview.Version()
-	})
+	}); err != nil {
+		log.Fatal(err)
+	}
 
 	// Bind an increment function
-	w.Bind("increment", func() (int, error) {
+	if err := w.Bind("increment", func() (int, error) {
 		count++
 		if count > 10 {
 			// Example of error handling
 			return count, fmt.Errorf("count is too high!")
 		}
 		return count, nil
-	})
+	}); err != nil {
+		log.Fatal(err)
+	}
 
 	// Start a background goroutine to update uptime
 	go func() {
@@ -121,12 +130,16 @@ func main() {
 			time.Sleep(time.Second)
 			uptime := int(time.Since(start).Seconds())
 			// Use Dispatch to safely interact with the webview from a goroutine
-			w.Dispatch(func() {
-				w.Eval(fmt.Sprintf("window.updateUptime(%d)", uptime))
+			_ = w.Dispatch(func() {
+				_ = w.Eval(fmt.Sprintf("window.updateUptime(%d)", uptime))
 			})
 		}
 	}()
 
-	w.SetHtml(html)
-	w.Run()
+	if err := w.SetHtml(html); err != nil {
+		log.Fatal(err)
+	}
+	if err := w.Run(); err != nil {
+		log.Fatal(err)
+	}
 }
