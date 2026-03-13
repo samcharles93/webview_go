@@ -20,7 +20,7 @@ package webview
 #include <stdint.h>
 
 void CgoWebViewDispatch(webview_t w, uintptr_t arg);
-void CgoWebViewBind(webview_t w, const char *name, uintptr_t index);
+void CgoWebViewBind(webview_t w, const char *name, uintptr_t arg);
 void CgoWebViewUnbind(webview_t w, const char *name);
 */
 import "C"
@@ -33,6 +33,7 @@ import (
 	"errors"
 	"reflect"
 	"runtime"
+	"runtime/cgo"
 	"sync"
 	"unsafe"
 )
@@ -59,6 +60,28 @@ const (
 	HintMax = C.WEBVIEW_HINT_MAX
 )
 
+// NativeHandleKind specifies the kind of native handle to retrieve.
+type NativeHandleKind int
+
+const (
+	// Top-level window. GtkWindow pointer (GTK), NSWindow pointer (Cocoa) or HWND (Win32).
+	NativeHandleKindUIWindow NativeHandleKind = C.WEBVIEW_NATIVE_HANDLE_KIND_UI_WINDOW
+	// Browser widget. GtkWidget pointer (GTK), NSView pointer (Cocoa) or HWND (Win32).
+	NativeHandleKindUIWidget NativeHandleKind = C.WEBVIEW_NATIVE_HANDLE_KIND_UI_WIDGET
+	// Browser controller. WebKitWebView pointer (GTK), WKWebView pointer (Cocoa) or ICoreWebView2Controller pointer (Win32/Edge).
+	NativeHandleKindBrowserController NativeHandleKind = C.WEBVIEW_NATIVE_HANDLE_KIND_BROWSER_CONTROLLER
+)
+
+// VersionInfo holds the library's version information.
+type VersionInfo struct {
+	Major         int
+	Minor         int
+	Patch         int
+	VersionNumber string
+	PreRelease    string
+	BuildMetadata string
+}
+
 type WebView interface {
 
 	// Run runs the main loop until it's terminated. After this function exits -
@@ -80,7 +103,11 @@ type WebView interface {
 	// Window returns a native window handle pointer. When using GTK backend the
 	// pointer is GtkWindow pointer, when using Cocoa backend the pointer is
 	// NSWindow pointer, when using Win32 backend the pointer is HWND pointer.
+	// Deprecated: Use NativeHandle(NativeHandleKindUIWindow) instead.
 	Window() unsafe.Pointer
+
+	// NativeHandle returns a native handle of the given kind.
+	NativeHandle(kind NativeHandleKind) unsafe.Pointer
 
 	// SetTitle updates the title of the native window. Must be called from the UI
 	// thread.
@@ -118,22 +145,24 @@ type WebView interface {
 	//
 	// f must be a function
 	// f must return either value and error or just error
-	Bind(name string, f interface{}) error
+	Bind(name string, f any) error
 
 	// Removes a callback that was previously set by Bind.
 	Unbind(name string) error
 }
 
 type webview struct {
-	w C.webview_t
+	w        C.webview_t
+	bindings map[string]cgo.Handle
+	mu       sync.Mutex
 }
 
-var (
-	m        sync.Mutex
-	index    uintptr
-	dispatch = map[uintptr]func(){}
-	bindings = map[uintptr]func(id, req string) (interface{}, error){}
-)
+type bindingFunc func(id, req string) (any, error)
+
+type bindingInfo struct {
+	w *webview
+	f bindingFunc
+}
 
 func boolToInt(b bool) C.int {
 	if b {
@@ -153,12 +182,33 @@ func New(debug bool) WebView { return NewWindow(debug, nil) }
 // Depending on the platform, a GtkWindow, NSWindow or HWND pointer can be passed
 // here.
 func NewWindow(debug bool, window unsafe.Pointer) WebView {
-	w := &webview{}
+	w := &webview{
+		bindings: make(map[string]cgo.Handle),
+	}
 	w.w = C.webview_create(boolToInt(debug), window)
 	return w
 }
 
+// Version returns the library's version information.
+func Version() VersionInfo {
+	info := C.webview_version()
+	return VersionInfo{
+		Major:         int(info.version.major),
+		Minor:         int(info.version.minor),
+		Patch:         int(info.version.patch),
+		VersionNumber: C.GoString(&info.version_number[0]),
+		PreRelease:    C.GoString(&info.pre_release[0]),
+		BuildMetadata: C.GoString(&info.build_metadata[0]),
+	}
+}
+
 func (w *webview) Destroy() {
+	w.mu.Lock()
+	for _, h := range w.bindings {
+		h.Delete()
+	}
+	w.bindings = nil
+	w.mu.Unlock()
 	C.webview_destroy(w.w)
 }
 
@@ -172,6 +222,10 @@ func (w *webview) Terminate() {
 
 func (w *webview) Window() unsafe.Pointer {
 	return C.webview_get_window(w.w)
+}
+
+func (w *webview) NativeHandle(kind NativeHandleKind) unsafe.Pointer {
+	return C.webview_get_native_handle(w.w, C.webview_native_handle_kind_t(kind))
 }
 
 func (w *webview) Navigate(url string) {
@@ -209,31 +263,26 @@ func (w *webview) Eval(js string) {
 }
 
 func (w *webview) Dispatch(f func()) {
-	m.Lock()
-	for ; dispatch[index] != nil; index++ {
-	}
-	dispatch[index] = f
-	m.Unlock()
-	C.CgoWebViewDispatch(w.w, C.uintptr_t(index))
+	h := cgo.NewHandle(f)
+	C.CgoWebViewDispatch(w.w, C.uintptr_t(h))
 }
 
 //export _webviewDispatchGoCallback
-func _webviewDispatchGoCallback(index unsafe.Pointer) {
-	m.Lock()
-	f := dispatch[uintptr(index)]
-	delete(dispatch, uintptr(index))
-	m.Unlock()
+func _webviewDispatchGoCallback(h C.uintptr_t) {
+	handle := cgo.Handle(h)
+	f := handle.Value().(func())
+	handle.Delete()
 	f()
 }
 
 //export _webviewBindingGoCallback
-func _webviewBindingGoCallback(w C.webview_t, id *C.char, req *C.char, index uintptr) {
-	m.Lock()
-	f := bindings[uintptr(index)]
-	m.Unlock()
-	jsString := func(v interface{}) string { b, _ := json.Marshal(v); return string(b) }
+func _webviewBindingGoCallback(id *C.char, req *C.char, h C.uintptr_t) {
+	handle := cgo.Handle(h)
+	info := handle.Value().(*bindingInfo)
+
+	jsString := func(v any) string { b, _ := json.Marshal(v); return string(b) }
 	status, result := 0, ""
-	if res, err := f(C.GoString(id), C.GoString(req)); err != nil {
+	if res, err := info.f(C.GoString(id), C.GoString(req)); err != nil {
 		status = -1
 		result = jsString(err.Error())
 	} else if b, err := json.Marshal(res); err != nil {
@@ -245,10 +294,10 @@ func _webviewBindingGoCallback(w C.webview_t, id *C.char, req *C.char, index uin
 	}
 	s := C.CString(result)
 	defer C.free(unsafe.Pointer(s))
-	C.webview_return(w, id, C.int(status), s)
+	C.webview_return(info.w.w, id, C.int(status), s)
 }
 
-func (w *webview) Bind(name string, f interface{}) error {
+func (w *webview) Bind(name string, f any) error {
 	v := reflect.ValueOf(f)
 	// f must be a function
 	if v.Kind() != reflect.Func {
@@ -259,7 +308,7 @@ func (w *webview) Bind(name string, f interface{}) error {
 		return errors.New("function may only return a value or a value+error")
 	}
 
-	binding := func(id, req string) (interface{}, error) {
+	binding := func(id, req string) (any, error) {
 		raw := []json.RawMessage{}
 		if err := json.Unmarshal([]byte(req), &raw); err != nil {
 			return nil, err
@@ -312,18 +361,31 @@ func (w *webview) Bind(name string, f interface{}) error {
 		}
 	}
 
-	m.Lock()
-	for ; bindings[index] != nil; index++ {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// If a binding with this name already exists, delete the old handle
+	if oldHandle, ok := w.bindings[name]; ok {
+		oldHandle.Delete()
 	}
-	bindings[index] = binding
-	m.Unlock()
+
+	h := cgo.NewHandle(&bindingInfo{w: w, f: binding})
+	w.bindings[name] = h
+
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
-	C.CgoWebViewBind(w.w, cname, C.uintptr_t(index))
+	C.CgoWebViewBind(w.w, cname, C.uintptr_t(h))
 	return nil
 }
 
 func (w *webview) Unbind(name string) error {
+	w.mu.Lock()
+	if h, ok := w.bindings[name]; ok {
+		h.Delete()
+		delete(w.bindings, name)
+	}
+	w.mu.Unlock()
+
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
 	C.CgoWebViewUnbind(w.w, cname)
