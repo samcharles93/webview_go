@@ -19,18 +19,21 @@ package webview
 #include <stdlib.h>
 #include <stdint.h>
 
-void CgoWebViewDispatch(webview_t w, uintptr_t arg);
-void CgoWebViewBind(webview_t w, const char *name, uintptr_t arg);
-void CgoWebViewUnbind(webview_t w, const char *name);
+typedef webview_error_t (*dispatch_fn)(webview_t w, void (*fn)(webview_t w, void *arg), void *arg);
+
+webview_error_t CgoWebViewDispatch(webview_t w, uintptr_t arg);
+webview_error_t CgoWebViewBind(webview_t w, const char *name, uintptr_t arg);
+webview_error_t CgoWebViewUnbind(webview_t w, const char *name);
 */
 import "C"
 import (
-	"encoding/json"
-	"errors"
 	_ "github.com/samcharles93/webview_go/libs/mswebview2"
 	_ "github.com/samcharles93/webview_go/libs/mswebview2/include"
 	_ "github.com/samcharles93/webview_go/libs/webview"
 	_ "github.com/samcharles93/webview_go/libs/webview/include"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"reflect"
 	"runtime"
 	"runtime/cgo"
@@ -48,16 +51,16 @@ type Hint int
 
 const (
 	// Width and height are default size
-	HintNone = C.WEBVIEW_HINT_NONE
+	HintNone Hint = C.WEBVIEW_HINT_NONE
 
 	// Window size can not be changed by a user
-	HintFixed = C.WEBVIEW_HINT_FIXED
+	HintFixed Hint = C.WEBVIEW_HINT_FIXED
 
 	// Width and height are minimum bounds
-	HintMin = C.WEBVIEW_HINT_MIN
+	HintMin Hint = C.WEBVIEW_HINT_MIN
 
 	// Width and height are maximum bounds
-	HintMax = C.WEBVIEW_HINT_MAX
+	HintMax Hint = C.WEBVIEW_HINT_MAX
 )
 
 // NativeHandleKind specifies the kind of native handle to retrieve.
@@ -86,19 +89,19 @@ type WebView interface {
 
 	// Run runs the main loop until it's terminated. After this function exits -
 	// you must destroy the webview.
-	Run()
+	Run() error
 
 	// Terminate stops the main loop. It is safe to call this function from
 	// a background thread.
-	Terminate()
+	Terminate() error
 
 	// Dispatch posts a function to be executed on the main thread. You normally
 	// do not need to call this function, unless you want to tweak the native
 	// window.
-	Dispatch(f func())
+	Dispatch(f func()) error
 
 	// Destroy destroys a webview and closes the native window.
-	Destroy()
+	Destroy() error
 
 	// Window returns a native window handle pointer. When using GTK backend the
 	// pointer is GtkWindow pointer, when using Cocoa backend the pointer is
@@ -111,31 +114,31 @@ type WebView interface {
 
 	// SetTitle updates the title of the native window. Must be called from the UI
 	// thread.
-	SetTitle(title string)
+	SetTitle(title string) error
 
 	// SetSize updates native window size. See Hint constants.
-	SetSize(w int, h int, hint Hint)
+	SetSize(w int, h int, hint Hint) error
 
 	// Navigate navigates webview to the given URL. URL may be a properly encoded data.
 	// URI. Examples:
 	// w.Navigate("https://github.com/webview/webview")
 	// w.Navigate("data:text/html,%3Ch1%3EHello%3C%2Fh1%3E")
 	// w.Navigate("data:text/html;base64,PGgxPkhlbGxvPC9oMT4=")
-	Navigate(url string)
+	Navigate(url string) error
 
 	// SetHtml sets the webview HTML directly.
 	// Example: w.SetHtml(w, "<h1>Hello</h1>");
-	SetHtml(html string)
+	SetHtml(html string) error
 
 	// Init injects JavaScript code at the initialization of the new page. Every
 	// time the webview will open a the new page - this initialization code will
 	// be executed. It is guaranteed that code is executed before window.onload.
-	Init(js string)
+	Init(js string) error
 
 	// Eval evaluates arbitrary JavaScript code. Evaluation happens asynchronously,
 	// also the result of the expression is ignored. Use RPC bindings if you want
 	// to receive notifications about the results of the evaluation.
-	Eval(js string)
+	Eval(js string) error
 
 	// Bind binds a callback function so that it will appear under the given name
 	// as a global JavaScript function. Internally it uses webview_init().
@@ -171,6 +174,27 @@ func boolToInt(b bool) C.int {
 	return 0
 }
 
+func webviewError(err C.webview_error_t) error {
+	switch err {
+	case C.WEBVIEW_ERROR_OK:
+		return nil
+	case C.WEBVIEW_ERROR_MISSING_DEPENDENCY:
+		return errors.New("missing dependency")
+	case C.WEBVIEW_ERROR_CANCELED:
+		return errors.New("operation canceled")
+	case C.WEBVIEW_ERROR_INVALID_STATE:
+		return errors.New("invalid state")
+	case C.WEBVIEW_ERROR_INVALID_ARGUMENT:
+		return errors.New("invalid argument")
+	case C.WEBVIEW_ERROR_DUPLICATE:
+		return errors.New("duplicate")
+	case C.WEBVIEW_ERROR_NOT_FOUND:
+		return errors.New("not found")
+	default:
+		return fmt.Errorf("unspecified error (%d)", int(err))
+	}
+}
+
 // New calls NewWindow to create a new window and a new webview instance. If debug
 // is non-zero - developer tools will be enabled (if the platform supports them).
 func New(debug bool) WebView { return NewWindow(debug, nil) }
@@ -186,6 +210,9 @@ func NewWindow(debug bool, window unsafe.Pointer) WebView {
 		bindings: make(map[string]cgo.Handle),
 	}
 	w.w = C.webview_create(boolToInt(debug), window)
+	if w.w == nil {
+		return nil
+	}
 	return w
 }
 
@@ -202,22 +229,22 @@ func Version() VersionInfo {
 	}
 }
 
-func (w *webview) Destroy() {
+func (w *webview) Destroy() error {
 	w.mu.Lock()
 	for _, h := range w.bindings {
 		h.Delete()
 	}
 	w.bindings = nil
 	w.mu.Unlock()
-	C.webview_destroy(w.w)
+	return webviewError(C.webview_destroy(w.w))
 }
 
-func (w *webview) Run() {
-	C.webview_run(w.w)
+func (w *webview) Run() error {
+	return webviewError(C.webview_run(w.w))
 }
 
-func (w *webview) Terminate() {
-	C.webview_terminate(w.w)
+func (w *webview) Terminate() error {
+	return webviewError(C.webview_terminate(w.w))
 }
 
 func (w *webview) Window() unsafe.Pointer {
@@ -228,43 +255,43 @@ func (w *webview) NativeHandle(kind NativeHandleKind) unsafe.Pointer {
 	return C.webview_get_native_handle(w.w, C.webview_native_handle_kind_t(kind))
 }
 
-func (w *webview) Navigate(url string) {
+func (w *webview) Navigate(url string) error {
 	s := C.CString(url)
 	defer C.free(unsafe.Pointer(s))
-	C.webview_navigate(w.w, s)
+	return webviewError(C.webview_navigate(w.w, s))
 }
 
-func (w *webview) SetHtml(html string) {
+func (w *webview) SetHtml(html string) error {
 	s := C.CString(html)
 	defer C.free(unsafe.Pointer(s))
-	C.webview_set_html(w.w, s)
+	return webviewError(C.webview_set_html(w.w, s))
 }
 
-func (w *webview) SetTitle(title string) {
+func (w *webview) SetTitle(title string) error {
 	s := C.CString(title)
 	defer C.free(unsafe.Pointer(s))
-	C.webview_set_title(w.w, s)
+	return webviewError(C.webview_set_title(w.w, s))
 }
 
-func (w *webview) SetSize(width int, height int, hint Hint) {
-	C.webview_set_size(w.w, C.int(width), C.int(height), C.webview_hint_t(hint))
+func (w *webview) SetSize(width int, height int, hint Hint) error {
+	return webviewError(C.webview_set_size(w.w, C.int(width), C.int(height), C.webview_hint_t(hint)))
 }
 
-func (w *webview) Init(js string) {
+func (w *webview) Init(js string) error {
 	s := C.CString(js)
 	defer C.free(unsafe.Pointer(s))
-	C.webview_init(w.w, s)
+	return webviewError(C.webview_init(w.w, s))
 }
 
-func (w *webview) Eval(js string) {
+func (w *webview) Eval(js string) error {
 	s := C.CString(js)
 	defer C.free(unsafe.Pointer(s))
-	C.webview_eval(w.w, s)
+	return webviewError(C.webview_eval(w.w, s))
 }
 
-func (w *webview) Dispatch(f func()) {
+func (w *webview) Dispatch(f func()) error {
 	h := cgo.NewHandle(f)
-	C.CgoWebViewDispatch(w.w, C.uintptr_t(h))
+	return webviewError(C.CgoWebViewDispatch(w.w, C.uintptr_t(h)))
 }
 
 //export _webviewDispatchGoCallback
@@ -374,8 +401,7 @@ func (w *webview) Bind(name string, f any) error {
 
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
-	C.CgoWebViewBind(w.w, cname, C.uintptr_t(h))
-	return nil
+	return webviewError(C.CgoWebViewBind(w.w, cname, C.uintptr_t(h)))
 }
 
 func (w *webview) Unbind(name string) error {
@@ -388,6 +414,5 @@ func (w *webview) Unbind(name string) error {
 
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
-	C.CgoWebViewUnbind(w.w, cname)
-	return nil
+	return webviewError(C.CgoWebViewUnbind(w.w, cname))
 }
