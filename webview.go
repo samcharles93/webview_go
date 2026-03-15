@@ -27,13 +27,13 @@ webview_error_t CgoWebViewUnbind(webview_t w, const char *name);
 */
 import "C"
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	_ "github.com/samcharles93/webview_go/libs/mswebview2"
 	_ "github.com/samcharles93/webview_go/libs/mswebview2/include"
 	_ "github.com/samcharles93/webview_go/libs/webview"
 	_ "github.com/samcharles93/webview_go/libs/webview/include"
-	"encoding/json"
-	"errors"
-	"fmt"
 	"reflect"
 	"runtime"
 	"runtime/cgo"
