@@ -98,10 +98,10 @@ func main() {
 	w := webview.New(true)
 	defer w.Destroy()
 
-	if err := w.SetTitle("Modern Bind Example"); err != nil {
+	if err := w.SetSize(480, 420, webview.HintNone); err != nil {
 		log.Fatal(err)
 	}
-	if err := w.SetSize(480, 420, webview.HintNone); err != nil {
+	if err := w.SetTitle("Modern Bind Example"); err != nil {
 		log.Fatal(err)
 	}
 
