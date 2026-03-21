@@ -42,6 +42,20 @@ Build the example. On Windows, add `-ldflags="-H windowsgui"` to the command lin
 go build
 ```
 
+### Linux and BSD dependencies
+
+On Linux, OpenBSD, FreeBSD, and NetBSD, pick one supported GTK/WebKitGTK pair:
+
+- Default: `gtk4` + `webkitgtk-6.0`
+- Optional: `gtk+-3.0` + `webkit2gtk-4.1`
+
+The default build targets `webkitgtk-6.0`. You can also select either backend explicitly with a build tag:
+
+```sh
+go build -tags webkitgtk_41
+go build -tags webkitgtk_60
+```
+
 ### Notes
 
 Calling `Eval()` or `Dispatch()` before `Run()` does not work because the webview instance has only been configured and not yet started.

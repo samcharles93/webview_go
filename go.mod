@@ -1,3 +1,3 @@
 module github.com/samcharles93/webview_go
 
-go 1.25
+go 1.26
