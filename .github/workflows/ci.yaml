@@ -25,18 +25,17 @@ jobs:
           - { image: macos-12,     go: '1.15' }
           - { image: macos-12,     go: '1.14' }
           - { image: macos-12,     go: '1.13' }
-          - { image: ubuntu-22.04, go: '1.22', apt: libgtk-4-dev libwebkitgtk-6.0-dev }
-          - { image: ubuntu-22.04, go: '1.22', apt: libgtk-3-dev libwebkit2gtk-4.1-dev }
-          - { image: ubuntu-22.04, go: '1.22', apt: libgtk-3-dev libwebkit2gtk-4.0-dev }
-          - { image: ubuntu-22.04, go: '1.21', apt: libgtk-3-dev libwebkit2gtk-4.1-dev }
-          - { image: ubuntu-22.04, go: '1.20', apt: libgtk-3-dev libwebkit2gtk-4.1-dev }
-          - { image: ubuntu-22.04, go: '1.19', apt: libgtk-3-dev libwebkit2gtk-4.1-dev }
-          - { image: ubuntu-22.04, go: '1.18', apt: libgtk-3-dev libwebkit2gtk-4.1-dev }
-          - { image: ubuntu-22.04, go: '1.17', apt: libgtk-3-dev libwebkit2gtk-4.1-dev }
-          - { image: ubuntu-22.04, go: '1.16', apt: libgtk-3-dev libwebkit2gtk-4.1-dev }
-          - { image: ubuntu-22.04, go: '1.15', apt: libgtk-3-dev libwebkit2gtk-4.1-dev }
-          - { image: ubuntu-22.04, go: '1.14', apt: libgtk-3-dev libwebkit2gtk-4.1-dev }
-          - { image: ubuntu-22.04, go: '1.13', apt: libgtk-3-dev libwebkit2gtk-4.1-dev }
+          - { image: ubuntu-22.04, go: '1.22', apt: libgtk-4-dev libwebkitgtk-6.0-dev, tags: webkitgtk_60 }
+          - { image: ubuntu-22.04, go: '1.22', apt: libgtk-3-dev libwebkit2gtk-4.1-dev, tags: webkitgtk_41 }
+          - { image: ubuntu-22.04, go: '1.21', apt: libgtk-3-dev libwebkit2gtk-4.1-dev, tags: webkitgtk_41 }
+          - { image: ubuntu-22.04, go: '1.20', apt: libgtk-3-dev libwebkit2gtk-4.1-dev, tags: webkitgtk_41 }
+          - { image: ubuntu-22.04, go: '1.19', apt: libgtk-3-dev libwebkit2gtk-4.1-dev, tags: webkitgtk_41 }
+          - { image: ubuntu-22.04, go: '1.18', apt: libgtk-3-dev libwebkit2gtk-4.1-dev, tags: webkitgtk_41 }
+          - { image: ubuntu-22.04, go: '1.17', apt: libgtk-3-dev libwebkit2gtk-4.1-dev, tags: webkitgtk_41 }
+          - { image: ubuntu-22.04, go: '1.16', apt: libgtk-3-dev libwebkit2gtk-4.1-dev, tags: webkitgtk_41 }
+          - { image: ubuntu-22.04, go: '1.15', apt: libgtk-3-dev libwebkit2gtk-4.1-dev, tags: webkitgtk_41 }
+          - { image: ubuntu-22.04, go: '1.14', apt: libgtk-3-dev libwebkit2gtk-4.1-dev, tags: webkitgtk_41 }
+          - { image: ubuntu-22.04, go: '1.13', apt: libgtk-3-dev libwebkit2gtk-4.1-dev, tags: webkitgtk_41 }
           - { image: windows-2022, go: '1.22' }
           - { image: windows-2022, go: '1.21' }
           # Go 1.20 is the earliest version that is usable in this environment as of 2024-08-31.
@@ -49,14 +48,47 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.0-dev
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go }}
+      - name: Resolve build tags
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.tags }}" ]; then
+            echo "GO_BUILD_TAGS=-tags ${{ matrix.tags }}" >> "$GITHUB_ENV"
+          else
+            echo "GO_BUILD_TAGS=" >> "$GITHUB_ENV"
+          fi
       - name: Build examples
-        run: >
-          go build
-          ./examples/basic
-          ./examples/bind
+        shell: bash
+        run: |
+          go build $GO_BUILD_TAGS ./examples/basic
+          go build $GO_BUILD_TAGS ./examples/bind
+      - name: Build package
+        shell: bash
+        run: go build $GO_BUILD_TAGS ./...
       - name: Run tests
-        run: go test
+        shell: bash
+        run: go test $GO_BUILD_TAGS ./...
+
+  windows-gnu-cross:
+    runs-on: ubuntu-22.04
+    name: Build (ubuntu-22.04, Go 1.22, windows GNU cross)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Install zig
+        run: sudo apt-get update && sudo apt-get install -y zig
+      - name: Cross-build Windows targets with zig
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '1'
+          CC: zig cc -target x86_64-windows-gnu
+          CXX: zig c++ -target x86_64-windows-gnu
+        run: |
+          go build ./...
+          go build ./examples/basic
