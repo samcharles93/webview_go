@@ -1,12 +1,12 @@
 # webview_go
 
-[![GoDoc](https://godoc.org/github.com/webview/webview_go?status.svg)](https://godoc.org/github.com/webview/webview_go)
-[![Go Report Card](https://goreportcard.com/badge/github.com/webview/webview_go)](https://goreportcard.com/report/github.com/webview/webview_go)
+[![Go Reference](https://pkg.go.dev/badge/github.com/samcharles93/webview_go.svg)](https://pkg.go.dev/github.com/samcharles93/webview_go)
+[![Go Report Card](https://goreportcard.com/badge/github.com/samcharles93/webview_go)](https://goreportcard.com/report/github.com/samcharles93/webview_go)
 
 Go language binding for the [webview library][webview].
 
 > [!NOTE]
-> Versions <= 0.1.1 are available in the [old repository][webview].
+> Versions <= 0.1.1 are available in the [old repository][old-repo].
 
 ### Getting Started
 
@@ -27,13 +27,13 @@ go mod init example.com/app
 Save one of the example programs into your project directory.
 
 ```sh
-curl -sSLo main.go "https://raw.githubusercontent.com/webview/webview_go/master/examples/basic/main.go"
+curl -sSLo main.go "https://raw.githubusercontent.com/samcharles93/webview_go/main/examples/basic/main.go"
 ```
 
 Install dependencies.
 
 ```sh
-go get github.com/webview/webview_go
+go get github.com/samcharles93/webview_go
 ```
 
 Build the example.
@@ -119,5 +119,6 @@ If a Windows build fails with missing WebView2 headers while using a GNU-family
 toolchain, verify that cgo is compiling against this module's vendored headers
 rather than a partial SDK installation.
 
-[go-docs]: https://pkg.go.dev/github.com/webview/webview_go
+[go-docs]: https://pkg.go.dev/github.com/samcharles93/webview_go
+[old-repo]: https://github.com/webview/webview_go
 [webview]: https://github.com/webview/webview
