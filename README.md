@@ -36,6 +36,26 @@ Install dependencies.
 go get github.com/samcharles93/webview_go
 ```
 
+Create a window with the recommended constructor.
+
+```go
+w, err := webview.NewWithOptions(webview.Options{
+    Title:  "Hello",
+    Width:  800,
+    Height: 600,
+    Hint:   webview.HintNone,
+    HTML:   "<h1>Hello from Go</h1>",
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer w.Destroy()
+
+if err := w.Run(); err != nil {
+    log.Fatal(err)
+}
+```
+
 Build the example.
 
 ```sh
@@ -47,6 +67,12 @@ On Windows, add `-ldflags="-H windowsgui"` to build a GUI executable:
 ```sh
 go build -ldflags="-H windowsgui"
 ```
+
+### API highlights
+
+- `NewWithOptions(...)` returns a typed error instead of failing with a nil `WebView`
+- `MarshalJS(...)`, `Call(...)`, and `DispatchCall(...)` help avoid hand-built `Eval(fmt.Sprintf(...))`
+- `errors.Is(err, webview.ErrMissingDependency)` and the other typed error sentinels work with constructor and runtime failures
 
 ### Linux and BSD dependencies
 

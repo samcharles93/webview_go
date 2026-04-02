@@ -95,15 +95,17 @@ func main() {
 	var count int
 	start := time.Now()
 
-	w := webview.New(true)
+	w, err := webview.NewWithOptions(webview.Options{
+		Debug:  true,
+		Title:  "Modern Bind Example",
+		Width:  480,
+		Height: 420,
+		Hint:   webview.HintNone,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
 	defer w.Destroy()
-
-	if err := w.SetSize(480, 420, webview.HintNone); err != nil {
-		log.Fatal(err)
-	}
-	if err := w.SetTitle("Modern Bind Example"); err != nil {
-		log.Fatal(err)
-	}
 
 	// Bind the version info
 	if err := w.Bind("getVersion", func() webview.VersionInfo {
@@ -129,10 +131,7 @@ func main() {
 		for {
 			time.Sleep(time.Second)
 			uptime := int(time.Since(start).Seconds())
-			// Use Dispatch to safely interact with the webview from a goroutine
-			_ = w.Dispatch(func() {
-				_ = w.Eval(fmt.Sprintf("window.updateUptime(%d)", uptime))
-			})
+			_ = w.DispatchCall("window.updateUptime", uptime)
 		}
 	}()
 

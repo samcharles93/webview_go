@@ -7,16 +7,12 @@ import (
 )
 
 func main() {
-	w := webview.New(false)
-	defer w.Destroy()
-
-	if err := w.SetSize(480, 320, webview.HintNone); err != nil {
-		log.Fatal(err)
-	}
-	if err := w.SetTitle("Basic Example"); err != nil {
-		log.Fatal(err)
-	}
-	if err := w.SetHtml(`
+	w, err := webview.NewWithOptions(webview.Options{
+		Title:  "Basic Example",
+		Width:  480,
+		Height: 320,
+		Hint:   webview.HintNone,
+		HTML: `
 		<!DOCTYPE html>
 		<html>
 		<head>
@@ -37,9 +33,12 @@ func main() {
 			<h1>Thanks for using webview_go!</h1>
 		</body>
 		</html>
-	`); err != nil {
+	`,
+	})
+	if err != nil {
 		log.Fatal(err)
 	}
+	defer w.Destroy()
 
 	if err := w.Run(); err != nil {
 		log.Fatal(err)

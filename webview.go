@@ -35,6 +35,7 @@ import (
 	"reflect"
 	"runtime"
 	"runtime/cgo"
+	"strings"
 	"sync"
 	"unsafe"
 )
@@ -81,6 +82,92 @@ type VersionInfo struct {
 	VersionNumber string
 	PreRelease    string
 	BuildMetadata string
+}
+
+// ErrorCode is a typed wrapper around the upstream webview error codes.
+type ErrorCode int
+
+const (
+	ErrorCodeOK                ErrorCode = C.WEBVIEW_ERROR_OK
+	ErrorCodeUnspecified       ErrorCode = C.WEBVIEW_ERROR_UNSPECIFIED
+	ErrorCodeMissingDependency ErrorCode = C.WEBVIEW_ERROR_MISSING_DEPENDENCY
+	ErrorCodeCanceled          ErrorCode = C.WEBVIEW_ERROR_CANCELED
+	ErrorCodeInvalidState      ErrorCode = C.WEBVIEW_ERROR_INVALID_STATE
+	ErrorCodeInvalidArgument   ErrorCode = C.WEBVIEW_ERROR_INVALID_ARGUMENT
+	ErrorCodeDuplicate         ErrorCode = C.WEBVIEW_ERROR_DUPLICATE
+	ErrorCodeNotFound          ErrorCode = C.WEBVIEW_ERROR_NOT_FOUND
+)
+
+func (c ErrorCode) String() string {
+	switch c {
+	case ErrorCodeOK:
+		return "ok"
+	case ErrorCodeMissingDependency:
+		return "missing dependency"
+	case ErrorCodeCanceled:
+		return "operation canceled"
+	case ErrorCodeInvalidState:
+		return "invalid state"
+	case ErrorCodeInvalidArgument:
+		return "invalid argument"
+	case ErrorCodeDuplicate:
+		return "duplicate"
+	case ErrorCodeNotFound:
+		return "not found"
+	case ErrorCodeUnspecified:
+		return "unspecified error"
+	default:
+		return fmt.Sprintf("unknown error (%d)", int(c))
+	}
+}
+
+// Error is a typed error returned by library operations.
+type Error struct {
+	Op     string
+	Code   ErrorCode
+	Detail string
+}
+
+func (e *Error) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
+	msg := e.Code.String()
+	if e.Detail != "" {
+		msg += ": " + e.Detail
+	}
+	if e.Op != "" {
+		return e.Op + ": " + msg
+	}
+	return msg
+}
+
+func (e *Error) Is(target error) bool {
+	t, ok := target.(*Error)
+	return ok && e.Code == t.Code
+}
+
+var (
+	ErrUnspecified       = &Error{Code: ErrorCodeUnspecified}
+	ErrMissingDependency = &Error{Code: ErrorCodeMissingDependency}
+	ErrCanceled          = &Error{Code: ErrorCodeCanceled}
+	ErrInvalidState      = &Error{Code: ErrorCodeInvalidState}
+	ErrInvalidArgument   = &Error{Code: ErrorCodeInvalidArgument}
+	ErrDuplicate         = &Error{Code: ErrorCodeDuplicate}
+	ErrNotFound          = &Error{Code: ErrorCodeNotFound}
+)
+
+// Options configures webview construction and common initial setup.
+type Options struct {
+	Debug       bool
+	Window      unsafe.Pointer
+	Title       string
+	Width       int
+	Height      int
+	Hint        Hint
+	HTML        string
+	URL         string
+	InitScripts []string
 }
 
 type WebView interface {
@@ -138,6 +225,14 @@ type WebView interface {
 	// to receive notifications about the results of the evaluation.
 	Eval(js string) error
 
+	// Call evaluates a JavaScript function call built from JSON-marshaled arguments.
+	// function is a JavaScript expression resolving to a callable value, such as
+	// "window.updateStats" or "globalThis.app.refresh".
+	Call(function string, args ...any) error
+
+	// DispatchCall posts a JavaScript function call to the UI thread.
+	DispatchCall(function string, args ...any) error
+
 	// Bind binds a callback function so that it will appear under the given name
 	// as a global JavaScript function. Internally it uses webview_init().
 	// Callback receives a request string and a user-provided argument pointer.
@@ -172,30 +267,180 @@ func boolToInt(b bool) C.int {
 	return 0
 }
 
-func webviewError(err C.webview_error_t) error {
-	switch err {
-	case C.WEBVIEW_ERROR_OK:
+func newError(op string, code ErrorCode, detail string) error {
+	if code == ErrorCodeOK {
 		return nil
-	case C.WEBVIEW_ERROR_MISSING_DEPENDENCY:
-		return errors.New("missing dependency")
-	case C.WEBVIEW_ERROR_CANCELED:
-		return errors.New("operation canceled")
-	case C.WEBVIEW_ERROR_INVALID_STATE:
-		return errors.New("invalid state")
-	case C.WEBVIEW_ERROR_INVALID_ARGUMENT:
-		return errors.New("invalid argument")
-	case C.WEBVIEW_ERROR_DUPLICATE:
-		return errors.New("duplicate")
-	case C.WEBVIEW_ERROR_NOT_FOUND:
-		return errors.New("not found")
-	default:
-		return fmt.Errorf("unspecified error (%d)", int(err))
 	}
+	return &Error{Op: op, Code: code, Detail: detail}
+}
+
+func webviewError(op string, err C.webview_error_t) error {
+	if err == C.WEBVIEW_ERROR_OK {
+		return nil
+	}
+	return newError(op, ErrorCode(err), "")
+}
+
+func validateOptions(opts Options) error {
+	if opts.HTML != "" && opts.URL != "" {
+		return newError("new with options", ErrorCodeInvalidArgument, "html and url cannot both be set")
+	}
+	if (opts.Width == 0) != (opts.Height == 0) {
+		return newError("new with options", ErrorCodeInvalidArgument, "width and height must both be set")
+	}
+	return nil
+}
+
+// MarshalJS marshals a Go value into a JavaScript literal using JSON encoding.
+func MarshalJS(v any) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func buildJSCall(function string, args ...any) (string, error) {
+	function = strings.TrimSpace(function)
+	if function == "" {
+		return "", newError("build js call", ErrorCodeInvalidArgument, "function cannot be empty")
+	}
+	argv := make([]string, 0, len(args))
+	for _, arg := range args {
+		js, err := MarshalJS(arg)
+		if err != nil {
+			return "", err
+		}
+		argv = append(argv, js)
+	}
+	return fmt.Sprintf("(%s)(%s)", function, strings.Join(argv, ", ")), nil
+}
+
+func makeBindingFunc(f any) (bindingFunc, error) {
+	v := reflect.ValueOf(f)
+	if v.Kind() != reflect.Func {
+		return nil, errors.New("only functions can be bound")
+	}
+	if n := v.Type().NumOut(); n > 2 {
+		return nil, errors.New("function may only return a value or a value+error")
+	}
+
+	return func(id, req string) (any, error) {
+		raw := []json.RawMessage{}
+		if err := json.Unmarshal([]byte(req), &raw); err != nil {
+			return nil, err
+		}
+
+		isVariadic := v.Type().IsVariadic()
+		numIn := v.Type().NumIn()
+		if (isVariadic && len(raw) < numIn-1) || (!isVariadic && len(raw) != numIn) {
+			return nil, errors.New("function arguments mismatch")
+		}
+		args := []reflect.Value{}
+		for i := range raw {
+			var arg reflect.Value
+			if isVariadic && i >= numIn-1 {
+				arg = reflect.New(v.Type().In(numIn - 1).Elem())
+			} else {
+				arg = reflect.New(v.Type().In(i))
+			}
+			if err := json.Unmarshal(raw[i], arg.Interface()); err != nil {
+				return nil, err
+			}
+			args = append(args, arg.Elem())
+		}
+		errorType := reflect.TypeOf((*error)(nil)).Elem()
+		res := v.Call(args)
+		switch len(res) {
+		case 0:
+			return nil, nil
+		case 1:
+			if res[0].Type().Implements(errorType) {
+				if res[0].Interface() != nil {
+					return nil, res[0].Interface().(error)
+				}
+				return nil, nil
+			}
+			return res[0].Interface(), nil
+		case 2:
+			if !res[1].Type().Implements(errorType) {
+				return nil, errors.New("second return value must be an error")
+			}
+			if res[1].Interface() == nil {
+				return res[0].Interface(), nil
+			}
+			return res[0].Interface(), res[1].Interface().(error)
+		default:
+			return nil, errors.New("unexpected number of return values")
+		}
+	}, nil
+}
+
+func (w *webview) cHandle(op string) (C.webview_t, error) {
+	if w == nil {
+		return nil, newError(op, ErrorCodeInvalidState, "webview is nil")
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.w == nil || w.bindings == nil {
+		return nil, newError(op, ErrorCodeInvalidState, "webview is destroyed")
+	}
+	return w.w, nil
+}
+
+func (w *webview) applyOptions(opts Options) error {
+	if opts.Title != "" {
+		if err := w.SetTitle(opts.Title); err != nil {
+			return err
+		}
+	}
+	if opts.Width != 0 {
+		if err := w.SetSize(opts.Width, opts.Height, opts.Hint); err != nil {
+			return err
+		}
+	}
+	for _, js := range opts.InitScripts {
+		if err := w.Init(js); err != nil {
+			return err
+		}
+	}
+	switch {
+	case opts.HTML != "":
+		return w.SetHtml(opts.HTML)
+	case opts.URL != "":
+		return w.Navigate(opts.URL)
+	default:
+		return nil
+	}
+}
+
+// NewWithOptions creates a new webview and applies common initial configuration.
+func NewWithOptions(opts Options) (WebView, error) {
+	if err := validateOptions(opts); err != nil {
+		return nil, err
+	}
+	w := &webview{
+		bindings: make(map[string]cgo.Handle),
+	}
+	w.w = C.webview_create(boolToInt(opts.Debug), opts.Window)
+	if w.w == nil {
+		return nil, newError("create", ErrorCodeUnspecified, "webview_create returned nil")
+	}
+	if err := w.applyOptions(opts); err != nil {
+		_ = C.webview_destroy(w.w)
+		w.w = nil
+		w.bindings = nil
+		return nil, err
+	}
+	return w, nil
 }
 
 // New calls NewWindow to create a new window and a new webview instance. If debug
 // is non-zero - developer tools will be enabled (if the platform supports them).
-func New(debug bool) WebView { return NewWindow(debug, nil) }
+func New(debug bool) WebView {
+	w, _ := NewWithOptions(Options{Debug: debug})
+	return w
+}
 
 // NewWindow creates a new webview instance. If debug is non-zero - developer
 // tools will be enabled (if the platform supports them). Window parameter can be
@@ -204,13 +449,7 @@ func New(debug bool) WebView { return NewWindow(debug, nil) }
 // Depending on the platform, a GtkWindow, NSWindow or HWND pointer can be passed
 // here.
 func NewWindow(debug bool, window unsafe.Pointer) WebView {
-	w := &webview{
-		bindings: make(map[string]cgo.Handle),
-	}
-	w.w = C.webview_create(boolToInt(debug), window)
-	if w.w == nil {
-		return nil
-	}
+	w, _ := NewWithOptions(Options{Debug: debug, Window: window})
 	return w
 }
 
@@ -229,67 +468,147 @@ func Version() VersionInfo {
 
 func (w *webview) Destroy() error {
 	w.mu.Lock()
-	for _, h := range w.bindings {
+	if w.w == nil || w.bindings == nil {
+		w.mu.Unlock()
+		return newError("destroy", ErrorCodeInvalidState, "webview is destroyed")
+	}
+	handle := w.w
+	bindings := w.bindings
+	w.mu.Unlock()
+
+	if err := webviewError("destroy", C.webview_destroy(handle)); err != nil {
+		return err
+	}
+
+	w.mu.Lock()
+	for _, h := range bindings {
 		h.Delete()
 	}
 	w.bindings = nil
+	w.w = nil
 	w.mu.Unlock()
-	return webviewError(C.webview_destroy(w.w))
+	return nil
 }
 
 func (w *webview) Run() error {
-	return webviewError(C.webview_run(w.w))
+	handle, err := w.cHandle("run")
+	if err != nil {
+		return err
+	}
+	return webviewError("run", C.webview_run(handle))
 }
 
 func (w *webview) Terminate() error {
-	return webviewError(C.webview_terminate(w.w))
+	handle, err := w.cHandle("terminate")
+	if err != nil {
+		return err
+	}
+	return webviewError("terminate", C.webview_terminate(handle))
 }
 
 func (w *webview) Window() unsafe.Pointer {
-	return C.webview_get_window(w.w)
+	handle, err := w.cHandle("window")
+	if err != nil {
+		return nil
+	}
+	return C.webview_get_window(handle)
 }
 
 func (w *webview) NativeHandle(kind NativeHandleKind) unsafe.Pointer {
-	return C.webview_get_native_handle(w.w, C.webview_native_handle_kind_t(kind))
+	handle, err := w.cHandle("native handle")
+	if err != nil {
+		return nil
+	}
+	return C.webview_get_native_handle(handle, C.webview_native_handle_kind_t(kind))
 }
 
 func (w *webview) Navigate(url string) error {
+	handle, err := w.cHandle("navigate")
+	if err != nil {
+		return err
+	}
 	s := C.CString(url)
 	defer C.free(unsafe.Pointer(s))
-	return webviewError(C.webview_navigate(w.w, s))
+	return webviewError("navigate", C.webview_navigate(handle, s))
 }
 
 func (w *webview) SetHtml(html string) error {
+	handle, err := w.cHandle("set html")
+	if err != nil {
+		return err
+	}
 	s := C.CString(html)
 	defer C.free(unsafe.Pointer(s))
-	return webviewError(C.webview_set_html(w.w, s))
+	return webviewError("set html", C.webview_set_html(handle, s))
 }
 
 func (w *webview) SetTitle(title string) error {
+	handle, err := w.cHandle("set title")
+	if err != nil {
+		return err
+	}
 	s := C.CString(title)
 	defer C.free(unsafe.Pointer(s))
-	return webviewError(C.webview_set_title(w.w, s))
+	return webviewError("set title", C.webview_set_title(handle, s))
 }
 
 func (w *webview) SetSize(width int, height int, hint Hint) error {
-	return webviewError(C.webview_set_size(w.w, C.int(width), C.int(height), C.webview_hint_t(hint)))
+	handle, err := w.cHandle("set size")
+	if err != nil {
+		return err
+	}
+	return webviewError("set size", C.webview_set_size(handle, C.int(width), C.int(height), C.webview_hint_t(hint)))
 }
 
 func (w *webview) Init(js string) error {
+	handle, err := w.cHandle("init")
+	if err != nil {
+		return err
+	}
 	s := C.CString(js)
 	defer C.free(unsafe.Pointer(s))
-	return webviewError(C.webview_init(w.w, s))
+	return webviewError("init", C.webview_init(handle, s))
 }
 
 func (w *webview) Eval(js string) error {
+	handle, err := w.cHandle("eval")
+	if err != nil {
+		return err
+	}
 	s := C.CString(js)
 	defer C.free(unsafe.Pointer(s))
-	return webviewError(C.webview_eval(w.w, s))
+	return webviewError("eval", C.webview_eval(handle, s))
+}
+
+func (w *webview) Call(function string, args ...any) error {
+	js, err := buildJSCall(function, args...)
+	if err != nil {
+		return err
+	}
+	return w.Eval(js)
+}
+
+func (w *webview) DispatchCall(function string, args ...any) error {
+	js, err := buildJSCall(function, args...)
+	if err != nil {
+		return err
+	}
+	return w.Dispatch(func() {
+		_ = w.Eval(js)
+	})
 }
 
 func (w *webview) Dispatch(f func()) error {
+	handle, err := w.cHandle("dispatch")
+	if err != nil {
+		return err
+	}
 	h := cgo.NewHandle(f)
-	return webviewError(C.CgoWebViewDispatch(w.w, C.uintptr_t(h)))
+	if err := webviewError("dispatch", C.CgoWebViewDispatch(handle, C.uintptr_t(h))); err != nil {
+		h.Delete()
+		return err
+	}
+	return nil
 }
 
 //export _webviewDispatchGoCallback
@@ -319,98 +638,74 @@ func _webviewBindingGoCallback(id *C.char, req *C.char, h C.uintptr_t) {
 	}
 	s := C.CString(result)
 	defer C.free(unsafe.Pointer(s))
-	C.webview_return(info.w.w, id, C.int(status), s)
+	if handle, err := info.w.cHandle("return"); err == nil {
+		C.webview_return(handle, id, C.int(status), s)
+	}
 }
 
 func (w *webview) Bind(name string, f any) error {
-	v := reflect.ValueOf(f)
-	// f must be a function
-	if v.Kind() != reflect.Func {
-		return errors.New("only functions can be bound")
+	handle, err := w.cHandle("bind")
+	if err != nil {
+		return err
 	}
-	// f must return either value and error or just error
-	if n := v.Type().NumOut(); n > 2 {
-		return errors.New("function may only return a value or a value+error")
-	}
-
-	binding := func(id, req string) (any, error) {
-		raw := []json.RawMessage{}
-		if err := json.Unmarshal([]byte(req), &raw); err != nil {
-			return nil, err
-		}
-
-		isVariadic := v.Type().IsVariadic()
-		numIn := v.Type().NumIn()
-		if (isVariadic && len(raw) < numIn-1) || (!isVariadic && len(raw) != numIn) {
-			return nil, errors.New("function arguments mismatch")
-		}
-		args := []reflect.Value{}
-		for i := range raw {
-			var arg reflect.Value
-			if isVariadic && i >= numIn-1 {
-				arg = reflect.New(v.Type().In(numIn - 1).Elem())
-			} else {
-				arg = reflect.New(v.Type().In(i))
-			}
-			if err := json.Unmarshal(raw[i], arg.Interface()); err != nil {
-				return nil, err
-			}
-			args = append(args, arg.Elem())
-		}
-		errorType := reflect.TypeOf((*error)(nil)).Elem()
-		res := v.Call(args)
-		switch len(res) {
-		case 0:
-			// No results from the function, just return nil
-			return nil, nil
-		case 1:
-			// One result may be a value, or an error
-			if res[0].Type().Implements(errorType) {
-				if res[0].Interface() != nil {
-					return nil, res[0].Interface().(error)
-				}
-				return nil, nil
-			}
-			return res[0].Interface(), nil
-		case 2:
-			// Two results: first one is value, second is error
-			if !res[1].Type().Implements(errorType) {
-				return nil, errors.New("second return value must be an error")
-			}
-			if res[1].Interface() == nil {
-				return res[0].Interface(), nil
-			}
-			return res[0].Interface(), res[1].Interface().(error)
-		default:
-			return nil, errors.New("unexpected number of return values")
-		}
-	}
-
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	// If a binding with this name already exists, delete the old handle
-	if oldHandle, ok := w.bindings[name]; ok {
-		oldHandle.Delete()
+	binding, err := makeBindingFunc(f)
+	if err != nil {
+		return err
 	}
 
 	h := cgo.NewHandle(&bindingInfo{w: w, f: binding})
-	w.bindings[name] = h
-
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
-	return webviewError(C.CgoWebViewBind(w.w, cname, C.uintptr_t(h)))
+	var oldHandle cgo.Handle
+	var hasOld bool
+
+	w.mu.Lock()
+	if current, ok := w.bindings[name]; ok {
+		oldHandle = current
+		hasOld = true
+	}
+	w.mu.Unlock()
+
+	if hasOld {
+		if err := webviewError("unbind", C.CgoWebViewUnbind(handle, cname)); err != nil {
+			h.Delete()
+			return err
+		}
+	}
+	if err := webviewError("bind", C.CgoWebViewBind(handle, cname, C.uintptr_t(h))); err != nil {
+		if hasOld {
+			_ = C.CgoWebViewBind(handle, cname, C.uintptr_t(oldHandle))
+		}
+		h.Delete()
+		return err
+	}
+
+	w.mu.Lock()
+	w.bindings[name] = h
+	w.mu.Unlock()
+	if hasOld {
+		oldHandle.Delete()
+	}
+	return nil
 }
 
 func (w *webview) Unbind(name string) error {
+	handle, err := w.cHandle("unbind")
+	if err != nil {
+		return err
+	}
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	err = webviewError("unbind", C.CgoWebViewUnbind(handle, cname))
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
+
 	w.mu.Lock()
 	if h, ok := w.bindings[name]; ok {
 		h.Delete()
 		delete(w.bindings, name)
 	}
 	w.mu.Unlock()
-
-	cname := C.CString(name)
-	defer C.free(unsafe.Pointer(cname))
-	return webviewError(C.CgoWebViewUnbind(w.w, cname))
+	return err
 }

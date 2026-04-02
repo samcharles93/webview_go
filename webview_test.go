@@ -1,27 +1,50 @@
 package webview
 
 import (
-	"flag"
+	"errors"
 	"log"
 	"os"
 	"testing"
 )
 
-func Example() {
-	w := New(true)
+func TestUISmoke(t *testing.T) {
+	if os.Getenv("WEBVIEW_GO_RUN_UI_TESTS") != "1" {
+		t.Skip("set WEBVIEW_GO_RUN_UI_TESTS=1 to run UI smoke tests")
+	}
+
+	w, err := NewWithOptions(Options{
+		Debug:  true,
+		Title:  "Hello",
+		Width:  480,
+		Height: 320,
+		Hint:   HintNone,
+	})
+	if err != nil {
+		if errors.Is(err, ErrMissingDependency) {
+			t.Skipf("missing runtime dependency: %v", err)
+		}
+		t.Fatalf("create webview: %v", err)
+	}
 	defer w.Destroy()
-	w.SetTitle("Hello")
-	w.Bind("noop", func() string {
+
+	if err := w.Bind("noop", func() string {
 		log.Println("hello")
 		return "hello"
-	})
-	w.Bind("add", func(a, b int) int {
+	}); err != nil {
+		t.Fatalf("bind noop: %v", err)
+	}
+	if err := w.Bind("add", func(a, b int) int {
 		return a + b
-	})
-	w.Bind("quit", func() {
-		w.Terminate()
-	})
-	w.SetHtml(`<!doctype html>
+	}); err != nil {
+		t.Fatalf("bind add: %v", err)
+	}
+	if err := w.Bind("quit", func() error {
+		return w.Terminate()
+	}); err != nil {
+		t.Fatalf("bind quit: %v", err)
+	}
+
+	if err := w.SetHtml(`<!doctype html>
 		<html>
 			<body>hello</body>
 			<script>
@@ -37,14 +60,10 @@ func Example() {
 				};
 			</script>
 		</html>
-	)`)
-	w.Run()
-}
-
-func TestMain(m *testing.M) {
-	flag.Parse()
-	if testing.Verbose() {
-		Example()
+	`); err != nil {
+		t.Fatalf("set html: %v", err)
 	}
-	os.Exit(m.Run())
+	if err := w.Run(); err != nil {
+		t.Fatalf("run: %v", err)
+	}
 }

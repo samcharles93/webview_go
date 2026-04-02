@@ -2,8 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
-	"fmt"
 	"log"
 	"os"
 	"runtime"
@@ -145,15 +143,17 @@ type InitData struct {
 }
 
 func main() {
-	w := webview.New(true)
+	w, err := webview.NewWithOptions(webview.Options{
+		Debug:  true,
+		Title:  "System Monitor",
+		Width:  400,
+		Height: 500,
+		Hint:   webview.HintMin,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
 	defer w.Destroy()
-
-	if err := w.SetSize(400, 500, webview.HintMin); err != nil {
-		log.Fatal(err)
-	}
-	if err := w.SetTitle("System Monitor"); err != nil {
-		log.Fatal(err)
-	}
 
 	if err := w.Bind("getInitData", func() InitData {
 		return InitData{
@@ -195,10 +195,7 @@ func main() {
 				MemAlloc: float64(int(memMB*100)) / 100, // Round to 2 decimals
 			}
 
-			// Safe UI update from goroutine
-			_ = w.Dispatch(func() {
-				_ = w.Eval(fmt.Sprintf("window.updateStats(%v)", jsonString(stats)))
-			})
+			_ = w.DispatchCall("window.updateStats", stats)
 		}
 	}()
 
@@ -208,11 +205,6 @@ func main() {
 	if err := w.Run(); err != nil {
 		log.Fatal(err)
 	}
-}
-
-func jsonString(v any) string {
-	b, _ := json.Marshal(v)
-	return string(b)
 }
 
 func getLinuxCPU() (idle, total uint64) {
